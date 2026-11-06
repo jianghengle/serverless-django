@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sam-example
+
+  Sample SAM Template for sam-example
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 30
+
+Resources:
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "MyUsers"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        -
+          AttributeName: "id"
+          AttributeType: "S"
+        -
+          AttributeName: "email"
+          AttributeType: "S"
+        -
+          AttributeName: "token"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "id"
+          KeyType: "HASH"
+      GlobalSecondaryIndexes:
+        -
+          IndexName: "emailGSI"
+          KeySchema:
+            -
+              AttributeName: "email"
+              KeyType: "HASH"
+          Projection:
+            ProjectionType: "ALL"
+        -
+          IndexName: "tokenGSI"
+          KeySchema:
+            -
+              AttributeName: "token"
+              KeyType: "HASH"
+          Projection:
+            ProjectionType: "ALL"
+
+  MyAppFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+        Version: '2012-10-17'
+      Policies:
+      - PolicyDocument: 
+          Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource: "*"
+          - Action: [
+              "dynamodb:DescribeTable",
+              "dynamodb:GetItem",
+              "dynamodb:PutItem",
+              "dynamodb:Query",
+              "dynamodb:Scan",
+              "dynamodb:UpdateItem",
+              "dynamodb:BatchExecuteStatement",
+              "dynamodb:BatchWriteItem"
+            ]
+            Effect: Allow
+            Resource:
+              - !GetAtt UsersTable.Arn
+              - !Join [ '/',[!GetAtt UsersTable.Arn, index/*]]
+          - Action:
+              - ses:SendEmail
+              - ses:SendRawEmail
+            Effect: Allow
+            Resource: "*"
+          # Claude Sonnet 4.5 via the US cross-region inference profile
+          # (admin_controller.call_bedrock_llm). The profile can route to any
+          # US region, so the foundation-model ARN uses a region wildcard.
+          - Action:
+              - bedrock:InvokeModel
+            Effect: Allow
+            Resource:
+              - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
+          Version: '2012-10-17'
+        PolicyName: 'MyAppFunctionRolePolicy'
+
+  MyAppFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: backend/
+      Handler: app.router.handle
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Events:
+        getProxy:
+          Type: Api
+          Properties:
+            Path: '/{proxy+}'
+            Method: get
+        postProxy:
+          Type: Api
+          Properties:
+            Path: '/{proxy+}'
+            Method: post
+        optionsProxy:
+          Type: Api
+          Properties:
+            Path: '/{proxy+}'
+            Method: options
+      Role:
+        !GetAtt MyAppFunctionRole.Arn
+
+  # ---------- Frontend: private S3 bucket served via CloudFront ----------
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-frontend-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Vue router uses history mode: rewrite extension-less paths to /index.html.
+  # (Custom error responses would also rewrite the API's 403/404 JSON errors.)
+  SpaRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-spa-rewrite"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rewrite SPA routes to index.html
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var req = event.request;
+          var last = req.uri.split('/').pop();
+          if (last.indexOf('.') === -1) { req.uri = '/index.html'; }
+          return req;
+        }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: ApiOrigin
+            DomainName: !Sub "${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # Managed-CachingOptimized
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SpaRewriteFunction.FunctionMetadata.FunctionARN
+        CacheBehaviors:
+          # Path already includes the stage (/Prod/...), so no OriginPath.
+          - PathPattern: 'Prod/api/*'
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: https-only        # redirects would break POSTs
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # Managed-CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # Managed-AllViewerExceptHostHeader
+
+  # Only this distribution (via OAC) can read objects; the bucket stays non-public.
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  MyAppApi:
+    Description: "API Gateway endpoint URL for Prod stage for MyApp function"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/ping/"
+  MyAppFunction:
+    Description: "MpApp Lambda Function ARN"
+    Value: !GetAtt MyAppFunction.Arn
+  MyAppFunctionIamRole:
+    Description: "Implicit IAM Role created for MyApp function"
+    Value: !GetAtt MyAppFunctionRole.Arn
+  UsersTable:
+    Description: "UsersTable DynamoDB Table ARN"
+    Value: !GetAtt UsersTable.Arn
+  FrontendBucketName:
+    Description: "S3 bucket holding the built frontend (upload frontend/dist here)"
+    Value: !Ref FrontendBucket
+  DistributionId:
+    Description: "CloudFront distribution ID (for cache invalidations)"
+    Value: !Ref Distribution
+  FrontendUrl:
+    Description: "CloudFront URL serving the frontend and /Prod/api/*"
+    Value: !Sub "https://${Distribution.DomainName}"
