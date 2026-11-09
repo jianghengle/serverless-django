@@ -1,4 +1,4 @@
-from ..my_http import MyError, admin_required
+from ..my_http import MyError, user_required
 from ..models.user_model import UserModel
 
 
@@ -19,7 +19,7 @@ def auth_user(req):
         'isAdmin': user.isAdmin,
     }
 
-@admin_required
+@user_required
 def verify_token(req):
     user = req.user
     return {
