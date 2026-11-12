@@ -80,7 +80,7 @@
 
       <div class="field mt-5" v-if="resp">
         <label class="label">Response</label>
-        <pre class="pre">{{ resp }}</pre>
+        <pre class="pre is-size-7">{{ resp }}</pre>
       </div>
 
     </section>
@@ -175,10 +175,11 @@ export default {
         (this.server + (this.pathPrefix ? this.pathPrefix.trim() : '') + this.path.trim())
       var headers = JSON.parse(this.headers)
       var data = null
-      if (this.method != 'GET') {
+      if (this.method != 'GET' && this.payload.trim()) {
         data = JSON.parse(this.payload)
       }
-      var vm = this
+      this.waiting = true
+      this.error = ''
       axios({
         method: method,
         url: url,
@@ -188,7 +189,8 @@ export default {
         this.resp = JSON.stringify(resp.data, null, 2)
         this.waiting = false
       }, err => {
-        this.error = err.body
+        this.error = err
+        this.waiting = false
       })
     },
     resetHeaders () {
