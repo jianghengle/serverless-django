@@ -180,6 +180,7 @@ export default {
       }
       this.waiting = true
       this.error = ''
+      this.resp = ''
       axios({
         method: method,
         url: url,
