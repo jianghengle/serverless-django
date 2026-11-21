@@ -38,6 +38,9 @@
                 <router-link :to="'/admin/ai-agent'" class="navbar-item">
                   <span>AI Agent</span>
                 </router-link>
+                <a class="navbar-item" @click="toggleAiCoding">
+                  <span>AI Coding</span>
+                </a>
               </div>
             </div>
             <div class="navbar-item has-dropdown is-hoverable" v-if="token">
@@ -91,9 +94,7 @@ export default {
   methods: {
     signout () {
       this.$store.commit('user/reset')
-      if (this.routerPath != '/admin') {
-        this.$router.push('/admin')
-      }
+      this.$router.push('/')
     },
     verifyToken () {
       var message = {
@@ -106,10 +107,15 @@ export default {
       }, err => {
         this.error = err.body
         this.$store.commit('user/reset')
-        if (this.routerPath != '/admin') {
-          this.$router.push('/admin')
-        }
+        this.$nextTick(() => {
+          if (!this.isAdmin) {
+            this.$store.commit('config/setAiCoding', false)
+          }
+        })
       })
+    },
+    toggleAiCoding () {
+      this.$store.commit('config/toggleAiCoding')
     },
   },
   mounted () {
