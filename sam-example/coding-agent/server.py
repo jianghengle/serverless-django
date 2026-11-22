@@ -22,6 +22,7 @@ import collections
 import hashlib
 import json
 import os
+import re
 import shlex
 import signal
 import sys
@@ -622,6 +623,7 @@ async def run_deploy(session):
                 steps.append(("deploy-frontend.sh", ["./deploy-frontend.sh"]))
 
             final = None
+            frontend_url = None
             for label, argv in steps:
                 await session.emit({"type": "tool_call", "name": label, "status": "calling"})
                 code, out = await run_raw(argv, ROOT, env=env, timeout=DEPLOY_TIMEOUT)
@@ -630,6 +632,14 @@ async def run_deploy(session):
                 if code != 0:
                     final = f"**`{label}` failed** (exit code {code}). Later steps were skipped.\n\n```\n{tail(out)}\n```"
                     break
+                if label == "deploy-frontend.sh":
+                    m = re.search(r"==> Done:\s*(\S+)", out)       # printed by deploy-frontend.sh
+                elif label == "sam deploy":
+                    m = re.search(r"Key\s+FrontendUrl\b[\s\S]*?\bValue\s+(\S+)", out)  # stack outputs
+                else:
+                    m = None
+                if m and (label == "deploy-frontend.sh" or not frontend_url):
+                    frontend_url = m.group(1)
             if final is None:
                 done = [f"Committed and pushed: \"{message}\""]
                 if status["backend"]:
@@ -637,6 +647,8 @@ async def run_deploy(session):
                 if status["frontend"]:
                     done.append("Frontend deployed")
                 final = "\n".join(f"- {d}" for d in done)
+                if frontend_url:
+                    final += f"\n\nFrontend URL: {frontend_url}"
     except Exception as e:
         print(f"Deploy error: {e!r}", file=sys.stderr)
         final = f"Error: {type(e).__name__}: {e}"
