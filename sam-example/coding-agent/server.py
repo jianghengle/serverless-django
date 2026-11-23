@@ -37,11 +37,15 @@ from websockets.exceptions import ConnectionClosed
 BACKEND_URL = os.environ.get("CODING_AGENT_BACKEND_URL", "http://localhost:3000")
 AUTH_TIMEOUT = 10
 DEPLOY_TIMEOUT = 1800
+# When the dev servers run as systemd user services, restart/log them through systemd
+# instead of spawning our own copies.
+USE_SYSTEMD = os.environ.get("CODING_AGENT_USE_SYSTEMD") == "1"
+SYSTEMD_UNITS = {"frontend": "frontend-dev", "backend": "backend-dev"}
 SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
 HISTORY_SENT = 10      # display messages replayed to the client on connect
 MAX_DISPLAY_KEPT = 200  # display messages stored per user
 MAX_LLM_TURNS = 20      # user turns kept in the model's context
-MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+MODEL_ID = os.environ.get("CODING_AGENT_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 REGION = "us-west-2"
 HOST = "127.0.0.1"
 PORT = 8765
@@ -240,7 +244,32 @@ async def pump_logs(name, proc):
     dev_logs[name].append(f"[process exited with code {await proc.wait()}]")
 
 
+def systemd_env():
+    env = clean_env()
+    env["XDG_RUNTIME_DIR"] = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return env
+
+
+async def systemd_logs(name, lines=80):
+    _, out = await run_raw(["journalctl", "--user-unit", SYSTEMD_UNITS[name], "-n", str(lines), "--no-pager"],
+                           ROOT, env=systemd_env(), timeout=30)
+    return out
+
+
+async def restart_systemd(name):
+    unit = SYSTEMD_UNITS[name]
+    # For the backend this also runs the unit's ExecStartPre (`sam build`), so allow it time.
+    code, out = await run_raw(["systemctl", "--user", "restart", unit], ROOT, env=systemd_env(), timeout=600)
+    if code != 0:
+        return f"{name}: `systemctl --user restart {unit}` failed:\n{truncate(out)}\n{truncate(await systemd_logs(name, 30))}"
+    await asyncio.sleep(4)
+    _, active = await run_raw(["systemctl", "--user", "is-active", unit], ROOT, env=systemd_env(), timeout=30)
+    return f"{name}: {active.strip()}\n" + truncate(await systemd_logs(name, 30))
+
+
 async def restart_one(name):
+    if USE_SYSTEMD:
+        return await restart_systemd(name)
     spec = DEV_SERVERS[name]
     old = dev_procs.pop(name, None)
     dev_logs[name].clear()
@@ -346,9 +375,11 @@ async def tool_restart_dev_server(target):
     return "\n\n".join([await restart_one(n) for n in names])
 
 
-def tool_get_dev_server_logs(target):
+async def tool_get_dev_server_logs(target):
     if target not in DEV_SERVERS:
         raise ValueError("target must be 'frontend' or 'backend'")
+    if USE_SYSTEMD:
+        return truncate(await systemd_logs(target)) or "(no output)"
     lines = list(dev_logs[target])[-80:]
     return truncate("\n".join(lines)) or "(no output; server not started via restart_dev_server?)"
 
@@ -371,7 +402,7 @@ async def run_tool(name, args):
         elif name == "restart_dev_server":
             out = await tool_restart_dev_server(args["target"])
         elif name == "get_dev_server_logs":
-            out = tool_get_dev_server_logs(args["target"])
+            out = await tool_get_dev_server_logs(args["target"])
         else:
             return f"Unknown tool: {name}", True
         return out, False

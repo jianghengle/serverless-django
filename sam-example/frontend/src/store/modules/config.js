@@ -2,7 +2,7 @@ const dev = process.env.NODE_ENV == 'development'
 
 // initial state
 export const state = {
-  server: dev ? 'http://localhost:3000' : '/Prod',
+  server: import.meta.env.VITE_API_SERVER || (dev ? 'http://localhost:3000' : '/Prod'),
   adminPrefix: '/api/admin/',
   aiCoding: localStorage.getItem('aiCoding') == 'true',
   aiCodingWidth: localStorage.getItem('aiCodingWidth') || '380',

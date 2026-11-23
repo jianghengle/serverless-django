@@ -1,11 +1,15 @@
 import { fileURLToPath, URL } from 'node:url'
 
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import legacy from '@vitejs/plugin-legacy'
 import vue2 from '@vitejs/plugin-vue2'
 
 // https://vitejs.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), 'VITE_')
+  return {
+  // Behind an HTTPS reverse proxy (e.g. Caddy), the HMR socket must use wss on port 443.
+  server: env.VITE_HMR_WSS ? { hmr: { protocol: 'wss', clientPort: 443 } } : {},
   plugins: [
     vue2(),
     legacy({
@@ -30,4 +34,5 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
   }
+}
 })
