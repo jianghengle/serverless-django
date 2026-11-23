@@ -7,7 +7,7 @@ from ..errors import MyError
 
 
 class UserModel(Model):
-    TableName = 'MyUsers'
+    TableName = 'SamExampleUsers'
     GSIs = {
         'emailGSI': 'email',
         'tokenGSI': 'token',

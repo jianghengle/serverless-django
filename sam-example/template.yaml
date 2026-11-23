@@ -14,7 +14,7 @@ Resources:
   UsersTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: "MyUsers"
+      TableName: "SamExampleUsers"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         -
