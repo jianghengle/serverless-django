@@ -203,6 +203,19 @@ def call_bedrock_llm(req):
 
     return json.loads(resp['body'].read())
 
+@admin_required
+def get_dev_box_info(req):
+    user = req.user
+    return user.devBox
+
+@admin_required
+def update_dev_box_info(req):
+    user = req.user
+    dev_box_info = user.devBox if user.devBox else {}
+    dev_box_info = {**dev_box_info, **req.body}
+    UserModel.update(user.id, {'devBox': dev_box_info})
+    return dev_box_info
+
 AdminRoutes = [
     ('GET', '/api/admin/get-tables', get_admin_tables),
     ('GET', '/api/admin/get-table/:model_name', get_admin_table),
@@ -213,4 +226,6 @@ AdminRoutes = [
     ('POST', '/api/admin/:model_name/update-item/:id', update_item),
     ('POST', '/api/admin/:model_name/delete-item/:id', delete_item),
     ('POST', '/api/admin/call-bedrock-llm', call_bedrock_llm),
+    ('GET', '/api/admin/get-dev-box-info', get_dev_box_info),
+    ('POST', '/api/admin/update-dev-box-info', get_dev_box_info),
 ]

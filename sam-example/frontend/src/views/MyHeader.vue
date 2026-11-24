@@ -38,6 +38,9 @@
                 <router-link :to="'/admin/ai-agent'" class="navbar-item">
                   <span>AI Agent</span>
                 </router-link>
+                <router-link :to="'/admin/dev-box'" class="navbar-item">
+                  <span>Dev Box</span>
+                </router-link>
                 <a class="navbar-item" @click="toggleAiCoding">
                   <span>AI Coding</span>
                 </a>

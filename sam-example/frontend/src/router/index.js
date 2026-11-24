@@ -6,6 +6,7 @@ import AdminTable from '../components/admin/AdminTable.vue'
 import AdminTableItem from '../components/admin/AdminTableItem.vue'
 import CallAPIs from '../components/admin/CallAPIs.vue'
 import AdminChat from '../components/admin/AdminChat.vue'
+import DevBox from '../components/admin/DevBox.vue'
 
 Vue.use(VueRouter)
 
@@ -42,6 +43,11 @@ const router = new VueRouter({
       path: '/admin/ai-agent',
       name: 'AdminChat',
       component: AdminChat
+    },
+    {
+      path: '/admin/dev-box',
+      name: 'DevBox',
+      component: DevBox
     },
   ]
 })

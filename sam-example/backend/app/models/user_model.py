@@ -23,6 +23,7 @@ class UserModel(Model):
         ('groups', 'list'),
         ('token', 'str', 'hidden'),
         ('tokenUsedAt', 'timestamp', 'auto'),
+        ('devBox', 'obj'),
         ('createdAt', 'timestamp', 'auto'),
         ('updatedAt', 'timestamp', 'auto'),
     ]
