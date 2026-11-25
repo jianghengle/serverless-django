@@ -1,7 +1,7 @@
 import json
 import os
 from decimal import Decimal
-
+import requests
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, ReadTimeoutError, ConnectTimeoutError
@@ -9,6 +9,9 @@ from botocore.exceptions import ClientError, ReadTimeoutError, ConnectTimeoutErr
 from ..my_http import MyError, admin_required
 from ..models.user_model import UserModel
 from ..services import dynamo_service
+
+REPO_NAME = 'serverless-django'
+GIT_BUCKET = 'hengle-git-bucket'
 
 # Claude Sonnet 4.5 via the US cross-region inference profile. Override with
 # the BEDROCK_MODEL_ID env var (e.g. to switch models) without a code change.
@@ -216,6 +219,28 @@ def update_dev_box_info(req):
     UserModel.update(user.id, {'devBox': dev_box_info})
     return dev_box_info
 
+@admin_required
+def get_dev_box_status(req):
+    user = req.user
+    url = user.devBox.get('url')
+    if not url:
+        raise MyError('No dev box url yet', 500)
+    resp = requests.post(url + '/dev-box/status', json={'token': user.token, 'repo': REPO_NAME}, timeout=20)
+    if resp.status_code != 200:
+        return False
+    return resp.json()
+
+@admin_required
+def setup_dev_box(req):
+    user = req.user
+    url = user.devBox.get('url')
+    if not url:
+        raise MyError('No dev box url yet', 500)
+    resp = requests.post(url + '/dev-box/setup', json={'token': user.token, 'repo': REPO_NAME, 'gitBucket': GIT_BUCKET}, timeout=60)
+    if resp.status_code != 200:
+        return False
+    return resp.json()
+
 AdminRoutes = [
     ('GET', '/api/admin/get-tables', get_admin_tables),
     ('GET', '/api/admin/get-table/:model_name', get_admin_table),
@@ -227,5 +252,7 @@ AdminRoutes = [
     ('POST', '/api/admin/:model_name/delete-item/:id', delete_item),
     ('POST', '/api/admin/call-bedrock-llm', call_bedrock_llm),
     ('GET', '/api/admin/get-dev-box-info', get_dev_box_info),
-    ('POST', '/api/admin/update-dev-box-info', get_dev_box_info),
+    ('POST', '/api/admin/update-dev-box-info', update_dev_box_info),
+    ('GET', '/api/admin/get-dev-box-status', get_dev_box_status),
+    ('POST', '/api/admin/setup-dev-box', setup_dev_box),
 ]

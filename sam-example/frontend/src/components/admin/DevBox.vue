@@ -13,7 +13,8 @@
       </div>
 
       <div v-if="devBox">
-        devBox
+        <button class="button" @click="getDevBoxStatus">getDevBoxStatus</button>
+        <button class="button" @click="setupDevBox">setupDevBox</button>
       </div>
       <div v-else>
         No dev box yet.
@@ -56,6 +57,20 @@ export default {
       }, err => {
         this.error = err.body
         this.waiting = false
+      })
+    },
+    getDevBoxStatus () {
+      this.$http.get(this.server + this.adminPrefix + 'get-dev-box-status').then(resp => {
+        console.log('resp.body', resp.body)
+      }, err => {
+        this.error = err.body
+      })
+    },
+    setupDevBox () {
+      this.$http.post(this.server + this.adminPrefix + 'setup-dev-box', {}).then(resp => {
+        console.log('resp.body', resp.body)
+      }, err => {
+        this.error = err.body
       })
     },
   },
