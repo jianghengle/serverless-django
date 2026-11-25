@@ -1,0 +1,458 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  dev-box-launcher
+
+  Step function to launch EC2 for dev box
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 600
+
+Parameters:
+  AmiId:
+    Type: String
+    Default: ami-0129277b072e7efb8
+  KeyName:
+    Type: String
+    Default: ClawEC2
+  InstanceType:
+    Type: String
+    Default: t4g.small
+  VolumeSizeGb:
+    Type: Number
+    Default: 30
+  # Who may connect to port 22. TEMPORARY: open to the whole internet while experimenting.
+  # Tighten to your own address (e.g. 203.0.113.7/32) or remove the rule when done.
+  SshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$'
+    ConstraintDescription: Must be an IPv4 CIDR such as 203.0.113.7/32
+  InstanceRoleArn:
+    Type: String
+    Default: arn:aws:iam::932651416286:role/My-EC2-Admin-Role
+  # RunInstances takes an instance profile, not a role. For a role created in the console the
+  # profile normally has the same name; check with:
+  #   aws iam list-instance-profiles-for-role --role-name My-EC2-Admin-Role
+  InstanceProfileName:
+    Type: String
+    Default: My-EC2-Admin-Role
+
+Resources:
+
+  DevBoxIpAllocationFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: DevBoxIpAllocationPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          # AllocateAddress and DescribeAddresses do not support resource-level restrictions.
+          - Effect: Allow
+            Action:
+              - ec2:AllocateAddress
+              - ec2:DescribeAddresses
+            Resource: "*"
+          # Tags may only be applied while allocating an address, not afterwards.
+          - Effect: Allow
+            Action: ec2:CreateTags
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:elastic-ip/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: AllocateAddress
+
+  DevBoxIpAllocationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dev_box_handler.handle_ip_allocation
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Timeout: 30
+      Role: !GetAtt DevBoxIpAllocationFunctionRole.Arn
+
+  DevBoxEc2CreationFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: DevBoxEc2CreationPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - ec2:DescribeVpcs
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeImages
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - ec2:CreateSecurityGroup
+              - ec2:AuthorizeSecurityGroupIngress
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*
+          - Effect: Allow
+            Action: ec2:RunInstances
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:key-pair/${KeyName}
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::image/${AmiId}
+          # tags may only be applied as part of creating the resource
+          - Effect: Allow
+            Action: ec2:CreateTags
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: [RunInstances, CreateSecurityGroup]
+          # only the dev box instance role may be handed to a new instance
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Ref InstanceRoleArn
+            Condition:
+              StringEquals:
+                iam:PassedToService: ec2.amazonaws.com
+
+  DevBoxEc2CreationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dev_box_handler.handle_ec2_creation
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Timeout: 120
+      Role: !GetAtt DevBoxEc2CreationFunctionRole.Arn
+      Environment:
+        Variables:
+          AMI_ID: !Ref AmiId
+          KEY_NAME: !Ref KeyName
+          INSTANCE_TYPE: !Ref InstanceType
+          VOLUME_SIZE_GB: !Ref VolumeSizeGb
+          INSTANCE_PROFILE_NAME: !Ref InstanceProfileName
+          SSH_CIDR: !Ref SshCidr
+
+  DevBoxEc2CheckFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+      # Only calls HTTPS endpoints, so it needs no AWS permissions beyond logging.
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  DevBoxEc2CheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dev_box_handler.handle_check_ec2
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Timeout: 30
+      Role: !GetAtt DevBoxEc2CheckFunctionRole.Arn
+
+  DevBoxSetupFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+      # Only calls HTTPS endpoints, so it needs no AWS permissions beyond logging.
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  DevBoxSetupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dev_box_handler.handle_dev_box_setup
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Timeout: 900   # the Lambda maximum: setup clones the repo and sam build runs before the backend is up
+      Role: !GetAtt DevBoxSetupFunctionRole.Arn
+
+  DevBoxTearDownFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: DevBoxTearDownPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeAddresses
+              - ec2:DescribeSecurityGroups
+            Resource: "*"
+          # Destructive actions only on resources the launcher created (Name tag dev-box-*).
+          - Effect: Allow
+            Action: ec2:TerminateInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringLike:
+                aws:ResourceTag/Name: dev-box-*
+          - Effect: Allow
+            Action: ec2:DeleteSecurityGroup
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+            Condition:
+              StringLike:
+                aws:ResourceTag/Name: dev-box-*
+          - Effect: Allow
+            Action: ec2:ReleaseAddress
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:elastic-ip/*
+            Condition:
+              StringLike:
+                aws:ResourceTag/Name: dev-box-*
+
+  DevBoxTearDownFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: dev_box_handler.handle_dev_box_tear_down
+      Runtime: python3.14
+      Architectures:
+        - arm64
+      Timeout: 600   # waiting for the instance to finish terminating takes a few minutes
+      Role: !GetAtt DevBoxTearDownFunctionRole.Arn
+
+  DevBoxStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [states.amazonaws.com]
+      Policies:
+      - PolicyName: InvokeDevBoxFunctions
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource:
+              - !GetAtt DevBoxIpAllocationFunction.Arn
+              - !GetAtt DevBoxEc2CreationFunction.Arn
+              - !GetAtt DevBoxEc2CheckFunction.Arn
+              - !GetAtt DevBoxSetupFunction.Arn
+
+  # Input: {"name", "token", "repo", "gitBucket", "prodApiServer"}
+  # Output: {"status": "Ready", "url", "instanceId"}
+  # The token travels through the execution history, so limit who may read executions of this machine.
+  DevBoxStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      Role: !GetAtt DevBoxStateMachineRole.Arn
+      DefinitionSubstitutions:
+        IpAllocationFunctionArn: !GetAtt DevBoxIpAllocationFunction.Arn
+        Ec2CreationFunctionArn: !GetAtt DevBoxEc2CreationFunction.Arn
+        Ec2CheckFunctionArn: !GetAtt DevBoxEc2CheckFunction.Arn
+        SetupFunctionArn: !GetAtt DevBoxSetupFunction.Arn
+      Definition:
+        Comment: Provision a dev box EC2 instance, set it up, and mark it Ready
+        TimeoutSeconds: 3600   # an instance that never comes up must not poll forever
+        StartAt: AllocateIp
+        States:
+          AllocateIp:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${IpAllocationFunctionArn}
+              Payload:
+                name.$: $.name
+            ResultSelector:
+              allocationId.$: $.Payload.allocationId
+              publicIp.$: $.Payload.publicIp
+              hostname.$: $.Payload.hostname
+            ResultPath: $.ip
+            Retry:
+              - ErrorEquals: [Lambda.ServiceException, Lambda.AWSLambdaException, Lambda.SdkClientException, Lambda.TooManyRequestsException]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: ProvisioningFailed
+            Next: CreateEc2
+
+          CreateEc2:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${Ec2CreationFunctionArn}
+              Payload:
+                allocationId.$: $.ip.allocationId
+                prodApiServer.$: $.prodApiServer
+                name.$: $.name
+            ResultSelector:
+              instanceId.$: $.Payload.instanceId
+              securityGroupId.$: $.Payload.securityGroupId
+            ResultPath: $.ec2
+            Retry:
+              - ErrorEquals: [Lambda.ServiceException, Lambda.AWSLambdaException, Lambda.SdkClientException, Lambda.TooManyRequestsException]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: ProvisioningFailed
+            Next: WaitForBoot
+
+          # Boot, attach the Elastic IP, get a certificate, start the dev-box server
+          WaitForBoot:
+            Type: Wait
+            Seconds: 60
+            Next: CheckEc2
+
+          CheckEc2:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${Ec2CheckFunctionArn}
+              Payload:
+                hostname.$: $.ip.hostname
+                token.$: $.token
+                repo.$: $.repo
+                prodApiServer.$: $.prodApiServer
+                instanceId.$: $.ec2.instanceId
+            ResultSelector:
+              ready.$: $.Payload
+            ResultPath: $.check
+            Retry:
+              - ErrorEquals: [Lambda.ServiceException, Lambda.AWSLambdaException, Lambda.SdkClientException, Lambda.TooManyRequestsException]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: ProvisioningFailed
+            Next: IsBoxUp
+
+          IsBoxUp:
+            Type: Choice
+            Choices:
+              - Variable: $.check.ready
+                BooleanEquals: true
+                Next: SetupBox
+            Default: WaitToRecheck
+
+          WaitToRecheck:
+            Type: Wait
+            Seconds: 20
+            Next: CheckEc2
+
+          SetupBox:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${SetupFunctionArn}
+              Payload:
+                hostname.$: $.ip.hostname
+                token.$: $.token
+                repo.$: $.repo
+                gitBucket.$: $.gitBucket
+                prodApiServer.$: $.prodApiServer
+            ResultSelector:
+              status.$: $.Payload.status
+              url.$: $.Payload.url
+            ResultPath: $.setup
+            Retry:
+              - ErrorEquals: [Lambda.ServiceException, Lambda.AWSLambdaException, Lambda.SdkClientException, Lambda.TooManyRequestsException]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: ProvisioningFailed
+            Next: Done
+
+          # Final output without the token
+          Done:
+            Type: Pass
+            Parameters:
+              status.$: $.setup.status
+              url.$: $.setup.url
+              instanceId.$: $.ec2.instanceId
+            End: true
+
+          ProvisioningFailed:
+            Type: Fail
+            Error: DevBoxProvisioningFailed
+            Cause: A provisioning step failed; see the execution history for the failing state.
+
+Outputs:
+  DevBoxIpAllocationFunctionArn:
+    Description: Allocates an Elastic IP for a dev box
+    Value: !GetAtt DevBoxIpAllocationFunction.Arn
+  DevBoxEc2CreationFunctionArn:
+    Description: Launches the dev box EC2 instance
+    Value: !GetAtt DevBoxEc2CreationFunction.Arn
+  DevBoxEc2CheckFunctionArn:
+    Description: Checks whether the dev box is serving and reports it to the prod API
+    Value: !GetAtt DevBoxEc2CheckFunction.Arn
+  DevBoxSetupFunctionArn:
+    Description: Sets up the dev box, waits for its services, and marks it Ready
+    Value: !GetAtt DevBoxSetupFunction.Arn
+  DevBoxStateMachineArn:
+    Description: Start an execution with {name, token, repo, gitBucket, prodApiServer}
+    Value: !Ref DevBoxStateMachine
+  DevBoxTearDownFunctionArn:
+    Description: Terminates a dev box and releases its resources
+    Value: !GetAtt DevBoxTearDownFunction.Arn
